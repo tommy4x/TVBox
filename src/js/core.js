@@ -1,3 +1,4 @@
+
 /* ============================================================
    TVBox Pro - 核心引擎 v2.1
    视频源管理 · 数据缓存 · 多线路切换 · 存储管理 · 在线源获取
@@ -69,40 +70,45 @@ const OnlineSourceFetcher = {
    * @returns {Promise<Array>} 源列表 [{name,url,format,type,needsPreview,fileType}]
    */
   async fetchFromRepo(repoInput) {
-    let owner, repo, branch = 'master';
-    const repoMatch = repoInput.match(/github\.com\/([^/]+)\/([^/#?\s]+)/i);
-    const shortMatch = repoInput.match(/^([^/]+)\/([^/]+)$/);
-    if (repoMatch) {
-      owner = repoMatch[1];
-      repo = repoMatch[2].replace(/\.git$/, '');
-    } else if (shortMatch) {
-      owner = shortMatch[1];
-      repo = shortMatch[2];
-    } else {
-      throw new Error('无法识别仓库地址，请输入 "owner/repo" 或完整 GitHub URL');
-    }
+    const input = String(repoInput || '').trim();
+    const match = input.match(/(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s?#]+)\/([^/\s?#]+)/i)
+      || input.match(/^([^/\s]+)\/([^/\s]+)$/);
+    if (!match) throw new Error('无法识别仓库地址，请输入 owner/repo 或 GitHub URL');
 
-    // Try master first, then main
-    let files;
-    try {
-      const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/?ref=${branch}`;
-      const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(apiUrl)}`;
-      const resp = await fetch(proxyUrl, { headers: { 'Accept': 'application/vnd.github.v3+json' } });
-      if (!resp.ok) throw new Error('master failed');
-      files = await resp.json();
-    } catch(e) {
-      try {
-        const apiUrl2 = `https://api.github.com/repos/${owner}/${repo}/contents/?ref=main`;
-        const proxyUrl2 = `https://corsproxy.io/?url=${encodeURIComponent(apiUrl2)}`;
-        const resp2 = await fetch(proxyUrl2);
-        if (!resp2.ok) throw new Error(`无法访问仓库：${resp2.status}`);
-        files = await resp2.json();
-        branch = 'main';
-      } catch(e2) {
-        throw new Error(`无法访问仓库 ${owner}/${repo}：请检查仓库是否存在且为公开`);
-      }
-    }
+    const owner = match[1];
+    const repo = match[2].replace(/\.git$/i, '');
+    const repoApi = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+    const info = await this._fetchJson(repoApi);
+    const branch = info.default_branch;
+    if (!branch) throw new Error('无法获取 GitHub 仓库默认分支');
+    const files = await this._fetchJson(`${repoApi}/contents/?ref=${encodeURIComponent(branch)}`);
+    if (!Array.isArray(files)) throw new Error('仓库根目录不是文件列表，请检查仓库地址');
     return this._parseRepoFiles(files, owner, repo, branch);
+  },
+
+  /** 直接读取公开资源；浏览器跨域限制由资源服务器决定 */
+  async _fetchText(url) {
+    let response;
+    try {
+      response = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    } catch (err) {
+      if (err?.name === 'TimeoutError') throw new Error('请求超时（20 秒）：' + url);
+      throw new Error('网络请求失败或目标站点不允许跨域访问（CORS）：' + url);
+    }
+    if (!response.ok) {
+      const hint = response.status === 401 ? '需要身份验证'
+        : response.status === 403 ? '访问被拒绝或 GitHub API 频率受限'
+        : response.status === 404 ? '文件或仓库不存在'
+        : response.status === 429 ? '请求过于频繁，请稍后重试' : response.statusText;
+      throw new Error(`HTTP ${response.status}：${hint}`);
+    }
+    return response.text();
+  },
+
+  async _fetchJson(url) {
+    const text = await this._fetchText(url);
+    try { return JSON.parse(text); }
+    catch { throw new Error('服务器返回的不是有效 JSON：' + url); }
   },
 
   /**
@@ -116,10 +122,7 @@ const OnlineSourceFetcher = {
     else if (lower.includes('.m3u')) format = 'm3u';
     else if (lower.includes('.txt')) format = 'txt';
 
-    const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
-    const resp = await fetch(proxyUrl);
-    if (!resp.ok) throw new Error(`获取失败：${resp.status} ${resp.statusText}`);
-    const text = await resp.text();
+    const text = await this._fetchText(url);
 
     if (format === 'json') {
       return this._parseJsonSources(text, url);
@@ -182,10 +185,7 @@ const OnlineSourceFetcher = {
    * 预览 JSON 文件内容（展开 TVBox 配置的 sites 列表）
    */
   async previewJsonSource(url) {
-    const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
-    const resp = await fetch(proxyUrl);
-    if (!resp.ok) throw new Error(`获取文件失败：${resp.status}`);
-    const text = await resp.text();
+    const text = await this._fetchText(url);
     return this._parseJsonSources(text, url);
   },
 
@@ -238,10 +238,7 @@ const OnlineSourceFetcher = {
    * 预览 TXT 内容（TVBox 直播格式）
    */
   async previewTxtSource(url) {
-    const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
-    const resp = await fetch(proxyUrl);
-    if (!resp.ok) throw new Error(`获取文件失败：${resp.status}`);
-    const text = await resp.text();
+    const text = await this._fetchText(url);
     return this._parseTxtSources(text, url);
   },
 
